@@ -1,0 +1,717 @@
+Imports Inventor
+Imports System
+Imports System.IO
+Imports System.Collections.Generic
+Imports System.Text
+Imports System.Windows.Forms
+
+
+Sub Main()
+
+    Dim etapa As String = "INICIALIZACAO"
+
+    Try
+
+        ' ==========================================
+        ' 1 - VERIFICAR MONTAGEM
+        ' ==========================================
+
+        etapa = "VERIFICACAO DA MONTAGEM"
+
+        Dim asmDoc As AssemblyDocument =
+            TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+
+        If asmDoc Is Nothing Then
+            Throw New Exception("Abra uma montagem IAM.")
+        End If
+
+        ' ==========================================
+        ' 2 - LOCALIZAR ARQUIVOS
+        ' ==========================================
+
+        etapa = "LOCALIZACAO DOS ARQUIVOS"
+
+        Dim pasta As String =
+            System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(asmDoc.FullFileName),
+                "iLogic_Processamento")
+
+        Dim arquivoEntrada As String =
+            System.IO.Path.Combine(
+                pasta,
+                "Corpos_Normalizados.csv")
+
+        Dim arquivoSaida As String =
+            System.IO.Path.Combine(
+                pasta,
+                "Pares_Comparacao.csv")
+
+        If Not System.IO.File.Exists(arquivoEntrada) Then
+
+            Throw New Exception(
+                "Corpos_Normalizados.csv nao encontrado.")
+
+        End If
+
+        ' ==========================================
+        ' 3 - LER CSV
+        ' ==========================================
+
+        etapa = "LEITURA DOS CORPOS NORMALIZADOS"
+
+        Dim linhas As String() =
+            System.IO.File.ReadAllLines(arquivoEntrada, Encoding.UTF8)
+
+        If linhas.Length < 2 Then
+            Throw New Exception("CSV sem registros.")
+        End If
+
+        Dim cabecalho As List(Of String) =
+            LerCSV(linhas(0))
+
+        Dim idxGrupo As Integer = -1
+        Dim idxPN As Integer = -1
+        Dim idxCaminho As Integer = -1
+        Dim idxStatus As Integer = -1
+
+        For i As Integer = 0 To cabecalho.Count - 1
+
+            Select Case cabecalho(i).Trim().ToUpperInvariant()
+
+                Case "GRUPO"
+                    idxGrupo = i
+
+                Case "PN_PRELIMINAR"
+                    idxPN = i
+
+                Case "CAMINHO"
+                    idxCaminho = i
+
+                Case "STATUS"
+                    idxStatus = i
+
+            End Select
+
+        Next
+
+        If idxGrupo < 0 OrElse
+           idxPN < 0 OrElse
+           idxCaminho < 0 OrElse
+           idxStatus < 0 Then
+
+            Throw New Exception(
+                "Cabecalho invalido em Corpos_Normalizados.csv.")
+
+        End If
+
+        ' ==========================================
+        ' 4 - ESTRUTURA DOS GRUPOS
+        ' ==========================================
+
+        etapa = "ORGANIZACAO DOS GRUPOS"
+
+        Dim grupos As New Dictionary(
+            Of String, List(Of String()))(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim erros As New List(Of String)
+
+        Dim totalIPTs As Integer = 0
+
+        For i As Integer = 1 To linhas.Length - 1
+
+            If String.IsNullOrWhiteSpace(linhas(i)) Then
+                Continue For
+            End If
+
+            Dim campos As List(Of String) =
+                LerCSV(linhas(i))
+
+            Try
+
+                If campos.Count <= Math.Max(
+                    idxGrupo,
+                    Math.Max(idxPN,
+                    Math.Max(idxCaminho, idxStatus))) Then
+
+                    Throw New Exception("Registro incompleto.")
+
+                End If
+
+                Dim grupo As String =
+                    campos(idxGrupo).Trim()
+
+                Dim pn As String =
+                    campos(idxPN).Trim()
+
+                Dim caminho As String =
+                    campos(idxCaminho).Trim()
+
+                Dim status As String =
+                    campos(idxStatus).Trim()
+
+                If status.ToUpperInvariant() <> "NORMALIZADO" Then
+
+                    Throw New Exception(
+                        "Registro nao possui status NORMALIZADO.")
+
+                End If
+
+                If grupo = "" OrElse caminho = "" Then
+
+                    Throw New Exception(
+                        "Grupo ou caminho vazio.")
+
+                End If
+
+                If Not grupos.ContainsKey(grupo) Then
+
+                    grupos.Add(
+                        grupo,
+                        New List(Of String()))
+
+                End If
+
+                Dim registro() As String = {
+                    pn,
+                    caminho
+                }
+
+                grupos(grupo).Add(registro)
+
+                totalIPTs += 1
+
+            Catch ex As Exception
+
+                erros.Add(
+                    "Linha " & (i + 1) &
+                    ": " & ex.Message)
+
+            End Try
+
+        Next
+
+        ' ==========================================
+        ' 5 - PREPARAR PARES
+        ' ==========================================
+
+        etapa = "GERACAO DOS PARES"
+
+        Dim pares As New List(Of String)
+
+        pares.Add(
+            "GRUPO;PN_A;CAMINHO_A;PN_B;CAMINHO_B;STATUS")
+
+        Dim totalGrupos As Integer = grupos.Count
+
+        Dim gruposMultiplos As Integer = 0
+
+        Dim gruposUnitarios As Integer = 0
+
+        Dim totalPares As Integer = 0
+
+        For Each kvp As KeyValuePair(
+            Of String, List(Of String())) In grupos
+
+            Dim lista As List(Of String()) =
+                kvp.Value
+
+            If lista.Count < 2 Then
+
+                gruposUnitarios += 1
+
+                Continue For
+
+            End If
+
+            gruposMultiplos += 1
+
+            ' ==================================
+            ' COMPARAR CADA PAR UMA UNICA VEZ
+            ' ==================================
+
+            For i As Integer = 0 To lista.Count - 2
+
+                For j As Integer = i + 1 To lista.Count - 1
+
+                    Dim pnA As String = lista(i)(0)
+
+                    Dim caminhoA As String = lista(i)(1)
+
+                    Dim pnB As String = lista(j)(0)
+
+                    Dim caminhoB As String = lista(j)(1)
+
+                    If String.Equals(
+                        caminhoA,
+                        caminhoB,
+                        StringComparison.OrdinalIgnoreCase) Then
+
+                        Continue For
+
+                    End If
+
+                    pares.Add(
+                        CSV(kvp.Key) & ";" &
+                        CSV(pnA) & ";" &
+                        CSV(caminhoA) & ";" &
+                        CSV(pnB) & ";" &
+                        CSV(caminhoB) & ";" &
+                        CSV("PENDENTE"))
+
+                    totalPares += 1
+
+                Next
+
+            Next
+
+        Next
+
+        ' ==========================================
+        ' 6 - GRAVAR CSV
+        ' ==========================================
+
+        etapa = "GRAVACAO DO CSV"
+
+        System.IO.File.WriteAllLines(
+            arquivoSaida,
+            pares.ToArray(),
+            Encoding.UTF8)
+
+        ' ==========================================
+        ' 7 - RELATORIO
+        ' ==========================================
+
+        Dim relatorio As String =
+            "MODULO 04.04-B1 - PARES PREPARADOS" &
+            vbCrLf & vbCrLf &
+            "Grupos identificados: " &
+            totalGrupos &
+            vbCrLf &
+            "Grupos com multiplas pecas: " &
+            gruposMultiplos &
+            vbCrLf &
+            "Grupos unitarios: " &
+            gruposUnitarios &
+            vbCrLf &
+            "IPTs identificados: " &
+            totalIPTs &
+            vbCrLf &
+            "Pares de comparacao: " &
+            totalPares &
+            vbCrLf &
+            "Erros: " &
+            erros.Count &
+            vbCrLf & vbCrLf &
+            "Part Numbers modificados: 0" &
+            vbCrLf &
+            "IPTs salvos: 0" &
+            vbCrLf & vbCrLf &
+            "Arquivo gerado:" &
+            vbCrLf &
+            arquivoSaida
+
+        If erros.Count > 0 Then
+
+            relatorio &= vbCrLf & vbCrLf &
+                "DETALHES:" &
+                vbCrLf &
+                String.Join(vbCrLf, erros.ToArray())
+
+        End If
+
+        MessageBox.Show(
+            relatorio,
+            "Modulo 04.04-B1",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information)
+
+    Catch ex As Exception
+
+        MessageBox.Show(
+            "ERRO NO MODULO 04.04-B1" &
+            vbCrLf & vbCrLf &
+            "ETAPA: " & etapa &
+            vbCrLf & vbCrLf &
+            ex.Message,
+            "Erro",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error)
+
+    End Try
+
+End Sub
+
+
+' ==============================================
+' LEITOR CSV
+' ==============================================
+
+Function LerCSV(linha As String) As List(Of String)
+
+    Dim campos As New List(Of String)
+
+    Dim campo As New StringBuilder
+
+    Dim dentroAspas As Boolean = False
+
+    Dim i As Integer = 0
+
+    While i < linha.Length
+
+        Dim c As Char = linha(i)
+
+        If c = """"c Then
+
+            If dentroAspas AndAlso
+               i + 1 < linha.Length AndAlso
+               linha(i + 1) = """"c Then
+
+                campo.Append(""""c)
+                i += 1
+
+            Else
+
+                dentroAspas = Not dentroAspas
+
+            End If
+
+        ElseIf c = ";"c AndAlso Not dentroAspas Then
+
+            campos.Add(campo.ToString())
+
+            campo.Clear()
+
+        Else
+
+            campo.Append(c)
+
+        End If
+
+        i += 1
+
+    End While
+
+    campos.Add(campo.ToString())
+
+    Return campos
+
+End Function
+
+
+Function CSV(valor As String) As String
+
+    If valor Is Nothing Then
+        valor = ""
+    End If
+
+    Return """" &
+        valor.Replace("""", """""") &
+        """"
+
+End Function
+
+' ============================================================
+' MODULO 04.04-B2.1
+' FUNCOES DE COMPARACAO GEOMETRICA
+' ============================================================
+
+' ------------------------------------------------------------
+' 1 - IDENTIFICAR CORPO SOLIDO
+' ------------------------------------------------------------
+
+Function ObterCorpoSolido(
+    partDoc As PartDocument) As SurfaceBody
+
+    Dim corpo As SurfaceBody = Nothing
+
+    Dim quantidade As Integer = 0
+
+    For Each body As SurfaceBody In
+        partDoc.ComponentDefinition.SurfaceBodies
+
+        If body.IsSolid Then
+
+            quantidade += 1
+            corpo = body
+
+        End If
+
+    Next
+
+    If quantidade <> 1 Then
+
+        Throw New Exception(
+            "Esperado exatamente um corpo solido. Encontrados: " &
+            quantidade)
+
+    End If
+
+    Return corpo
+
+End Function
+
+
+' ------------------------------------------------------------
+' 2 - CRIAR COPIA TEMPORARIA
+' ------------------------------------------------------------
+
+Function CriarCopiaTemporaria(
+    corpoOriginal As SurfaceBody,
+    tb As TransientBRep) As SurfaceBody
+
+    Dim copia As SurfaceBody =
+        tb.Copy(corpoOriginal)
+
+    If copia Is Nothing Then
+
+        Throw New Exception(
+            "Falha ao criar copia temporaria.")
+
+    End If
+
+    Return copia
+
+End Function
+
+
+' ------------------------------------------------------------
+' 3 - NORMALIZAR CORPO
+' ------------------------------------------------------------
+
+Sub NormalizarCorpo(
+    corpo As SurfaceBody,
+    tb As TransientBRep,
+    tg As TransientGeometry)
+
+    Dim caixa As Box = corpo.RangeBox
+
+    Dim centroX As Double =
+        (caixa.MinPoint.X + caixa.MaxPoint.X) / 2.0
+
+    Dim centroY As Double =
+        (caixa.MinPoint.Y + caixa.MaxPoint.Y) / 2.0
+
+    Dim inicioZ As Double =
+        caixa.MinPoint.Z
+
+    Dim deslocamento As Vector =
+        tg.CreateVector(
+            -centroX,
+            -centroY,
+            -inicioZ)
+
+    Dim matriz As Matrix =
+        tg.CreateMatrix()
+
+    matriz.SetTranslation(deslocamento)
+
+    tb.Transform(corpo, matriz)
+
+End Sub
+
+
+' ------------------------------------------------------------
+' 4 - ROTACIONAR CORPO NO EIXO Z
+' ------------------------------------------------------------
+
+Sub RotacionarCorpo(
+    corpo As SurfaceBody,
+    angulo As Integer,
+    tb As TransientBRep,
+    tg As TransientGeometry)
+
+    If angulo = 0 Then Return
+
+    Dim eixoZ As Vector =
+        tg.CreateVector(0, 0, 1)
+
+    Dim origem As Point =
+        tg.CreatePoint(0, 0, 0)
+
+    Dim matriz As Matrix =
+        tg.CreateMatrix()
+
+    matriz.SetToRotation(
+        angulo * Math.PI / 180.0,
+        eixoZ,
+        origem)
+
+    tb.Transform(corpo, matriz)
+
+End Sub
+
+
+' ------------------------------------------------------------
+' 5 - EXECUTAR DIFERENCAS BOOLEANAS
+' ------------------------------------------------------------
+
+Sub CalcularDiferencas(
+    corpoA As SurfaceBody,
+    corpoB As SurfaceBody,
+    tb As TransientBRep,
+    ByRef volumeAmenosB As Double,
+    ByRef volumeBmenosA As Double)
+
+    Dim precisao As Double = 0.0001
+
+    ' Criar ferramentas independentes
+
+    Dim diferencaA As SurfaceBody =
+        tb.Copy(corpoA)
+
+    Dim ferramentaB As SurfaceBody =
+        tb.Copy(corpoB)
+
+    Dim diferencaB As SurfaceBody =
+        tb.Copy(corpoB)
+
+    Dim ferramentaA As SurfaceBody =
+        tb.Copy(corpoA)
+
+    ' A MENOS B
+
+    tb.DoBoolean(
+        diferencaA,
+        ferramentaB,
+        BooleanTypeEnum.kBooleanTypeDifference)
+
+    volumeAmenosB =
+        Math.Abs(diferencaA.Volume(precisao))
+
+    ' B MENOS A
+
+    tb.DoBoolean(
+        diferencaB,
+        ferramentaA,
+        BooleanTypeEnum.kBooleanTypeDifference)
+
+    volumeBmenosA =
+        Math.Abs(diferencaB.Volume(precisao))
+
+End Sub
+
+
+' ------------------------------------------------------------
+' 6 - COMPARAR DUAS GEOMETRIAS
+' ------------------------------------------------------------
+
+Function GeometriasEquivalentes(
+    caminhoA As String,
+    caminhoB As String,
+    tb As TransientBRep,
+    tg As TransientGeometry,
+    ByRef anguloEncontrado As Integer,
+    ByRef volumeAmenosB As Double,
+    ByRef volumeBmenosA As Double) As Boolean
+
+    Dim toleranciaVolume As Double = 0.000001
+
+    Dim precisaoVolume As Double = 0.0001
+
+    anguloEncontrado = -1
+
+    volumeAmenosB = -1
+    volumeBmenosA = -1
+
+    ' ABRIR DOCUMENTOS
+
+    Dim docA As PartDocument =
+        TryCast(
+            ThisApplication.Documents.Open(caminhoA, False),
+            PartDocument)
+
+    If docA Is Nothing Then
+
+        Throw New Exception(
+            "Nao foi possivel abrir o IPT A.")
+
+    End If
+
+    Dim docB As PartDocument =
+        TryCast(
+            ThisApplication.Documents.Open(caminhoB, False),
+            PartDocument)
+
+    If docB Is Nothing Then
+
+        Throw New Exception(
+            "Nao foi possivel abrir o IPT B.")
+
+    End If
+
+    ' IDENTIFICAR CORPOS
+
+    Dim originalA As SurfaceBody =
+        ObterCorpoSolido(docA)
+
+    Dim originalB As SurfaceBody =
+        ObterCorpoSolido(docB)
+
+    ' VERIFICAR VOLUMES ORIGINAIS
+
+    Dim volumeOriginalA As Double =
+        originalA.Volume(precisaoVolume)
+
+    Dim volumeOriginalB As Double =
+        originalB.Volume(precisaoVolume)
+
+    If Math.Abs(
+        volumeOriginalA - volumeOriginalB) >
+        toleranciaVolume Then
+
+        Return False
+
+    End If
+
+    ' TESTAR ROTACOES
+
+    Dim angulos() As Integer = {
+        0,
+        90,
+        180,
+        270
+    }
+
+    For Each angulo As Integer In angulos
+
+        Dim copiaA As SurfaceBody =
+            CriarCopiaTemporaria(originalA, tb)
+
+        Dim copiaB As SurfaceBody =
+            CriarCopiaTemporaria(originalB, tb)
+
+        NormalizarCorpo(copiaA, tb, tg)
+
+        NormalizarCorpo(copiaB, tb, tg)
+
+        RotacionarCorpo(
+            copiaB,
+            angulo,
+            tb,
+            tg)
+
+        NormalizarCorpo(copiaB, tb, tg)
+
+        CalcularDiferencas(
+            copiaA,
+            copiaB,
+            tb,
+            volumeAmenosB,
+            volumeBmenosA)
+
+        If volumeAmenosB <= toleranciaVolume AndAlso
+           volumeBmenosA <= toleranciaVolume Then
+
+            anguloEncontrado = angulo
+
+            Return True
+
+        End If
+
+    Next
+
+    Return False
+
+End Function
+
