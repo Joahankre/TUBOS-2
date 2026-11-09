@@ -1,0 +1,420 @@
+Imports Inventor
+Imports System
+Imports System.IO
+Imports System.Collections.Generic
+Imports System.Text
+Imports System.Windows.Forms
+
+
+Sub Main()
+
+    Dim etapa As String = "INICIALIZACAO"
+
+    Try
+
+        ' ==========================================
+        ' 1 - VERIFICAR MONTAGEM
+        ' ==========================================
+
+        etapa = "VERIFICACAO DA MONTAGEM"
+
+        Dim asmDoc As AssemblyDocument =
+            TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+
+        If asmDoc Is Nothing Then
+
+            MessageBox.Show("Abra uma montagem IAM.")
+            Return
+
+        End If
+
+        ' ==========================================
+        ' 2 - LOCALIZAR PASTA DE PROCESSAMENTO
+        ' ==========================================
+
+        etapa = "LOCALIZACAO DA PASTA"
+
+        Dim pasta As String =
+            System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(
+                    asmDoc.FullFileName),
+                "iLogic_Processamento")
+
+        If Not Directory.Exists(pasta) Then
+
+            Throw New Exception(
+                "Pasta iLogic_Processamento nao encontrada.")
+
+        End If
+
+        ' ==========================================
+        ' 3 - LOCALIZAR CSV
+        ' ==========================================
+
+        etapa = "LOCALIZACAO DO CSV"
+
+        Dim arquivoEntrada As String =
+            System.IO.Path.Combine(
+                pasta,
+                "Grupos_Geometricos.csv")
+
+        If Not System.IO.File.Exists(arquivoEntrada) Then
+
+            Throw New Exception(
+                "Arquivo Grupos_Geometricos.csv nao encontrado.")
+
+        End If
+
+        ' ==========================================
+        ' 4 - ESTRUTURAS DE DADOS
+        ' ==========================================
+
+        etapa = "CRIACAO DAS ESTRUTURAS"
+
+        Dim grupos As New Dictionary(
+            Of String, List(Of RegistroPeca))(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim erros As New List(Of String)
+
+        Dim totalRegistros As Integer = 0
+        Dim totalCaminhosValidos As Integer = 0
+        Dim totalCaminhosInvalidos As Integer = 0
+
+        ' ==========================================
+        ' 5 - LER ARQUIVO CSV
+        ' ==========================================
+
+        etapa = "LEITURA DO CSV"
+
+        Dim linhas As String() =
+            System.IO.File.ReadAllLines(
+                arquivoEntrada,
+                Encoding.UTF8)
+
+        If linhas.Length < 2 Then
+
+            Throw New Exception(
+                "CSV vazio ou sem registros.")
+
+        End If
+
+        ' ==========================================
+        ' 6 - VALIDAR CABECALHO
+        ' ==========================================
+
+        etapa = "VALIDACAO DO CABECALHO"
+
+        Dim cabecalho As List(Of String) =
+            LerCSV(linhas(0))
+
+        If cabecalho.Count < 5 Then
+
+            Throw New Exception(
+                "Cabecalho possui menos de cinco colunas.")
+
+        End If
+
+        ' ==========================================
+        ' 7 - IDENTIFICAR COLUNAS
+        ' ==========================================
+
+        Dim indiceGrupo As Integer = 0
+        Dim indicePN As Integer = 1
+        Dim indiceCaminho As Integer = -1
+        Dim indicePNOriginal As Integer = -1
+
+        For i As Integer = 0 To cabecalho.Count - 1
+
+            Dim nome As String =
+                cabecalho(i).Trim().ToUpperInvariant()
+
+            If nome = "CAMINHO" Then
+                indiceCaminho = i
+            End If
+
+            If nome = "PN_ORIGINAL" Then
+                indicePNOriginal = i
+            End If
+
+        Next
+
+        If indiceCaminho = -1 OrElse
+           indicePNOriginal = -1 Then
+
+            Throw New Exception(
+                "Colunas CAMINHO ou PN_ORIGINAL nao encontradas." &
+                vbCrLf &
+                "Cabecalho identificado: " &
+                String.Join(";", cabecalho.ToArray()))
+
+        End If
+
+        ' ==========================================
+        ' 8 - PROCESSAR REGISTROS
+        ' ==========================================
+
+        etapa = "PROCESSAMENTO DOS REGISTROS"
+
+        For i As Integer = 1 To linhas.Length - 1
+
+            Try
+
+                If String.IsNullOrWhiteSpace(linhas(i)) Then
+                    Continue For
+                End If
+
+                Dim campos As List(Of String) =
+                    LerCSV(linhas(i))
+
+                If campos.Count <= Math.Max(
+                    indiceCaminho,
+                    indicePNOriginal) Then
+
+                    Throw New Exception(
+                        "Quantidade de colunas insuficiente.")
+
+                End If
+
+                Dim registro As New RegistroPeca
+
+                registro.Grupo =
+                    campos(indiceGrupo).Trim()
+
+                registro.PartNumber =
+                    campos(indicePN).Trim()
+
+                registro.Caminho =
+                    campos(indiceCaminho).Trim()
+
+                registro.PNOriginal =
+                    campos(indicePNOriginal).Trim()
+
+                If String.IsNullOrWhiteSpace(
+                    registro.Grupo) Then
+
+                    Throw New Exception("Grupo vazio.")
+
+                End If
+
+                If String.IsNullOrWhiteSpace(
+                    registro.Caminho) Then
+
+                    Throw New Exception("Caminho IPT vazio.")
+
+                End If
+
+                If Not grupos.ContainsKey(
+                    registro.Grupo) Then
+
+                    grupos.Add(
+                        registro.Grupo,
+                        New List(Of RegistroPeca))
+
+                End If
+
+                grupos(registro.Grupo).Add(registro)
+
+                totalRegistros += 1
+
+                If System.IO.File.Exists(registro.Caminho) Then
+
+                    totalCaminhosValidos += 1
+
+                Else
+
+                    totalCaminhosInvalidos += 1
+
+                    erros.Add(
+                        "Arquivo nao encontrado: " &
+                        registro.Caminho)
+
+                End If
+
+            Catch ex As Exception
+
+                erros.Add(
+                    "Linha " & (i + 1) &
+                    ": " & ex.Message)
+
+            End Try
+
+        Next
+
+        ' ==========================================
+        ' 9 - VALIDACAO FINAL
+        ' ==========================================
+
+        etapa = "VALIDACAO FINAL"
+
+        Dim gruposMultiplos As Integer = 0
+        Dim gruposUnitarios As Integer = 0
+
+        For Each grupo As KeyValuePair(
+            Of String, List(Of RegistroPeca)) In grupos
+
+            If grupo.Value.Count > 1 Then
+
+                gruposMultiplos += 1
+
+            Else
+
+                gruposUnitarios += 1
+
+            End If
+
+        Next
+
+        ' ==========================================
+        ' 10 - RELATORIO
+        ' ==========================================
+
+        Dim relatorio As String = ""
+
+        relatorio &=
+            "MODULO 04.01 - LEITURA CONCLUIDA" &
+            vbCrLf & vbCrLf
+
+        relatorio &=
+            "Grupos identificados: " &
+            grupos.Count &
+            vbCrLf
+
+        relatorio &=
+            "Grupos com multiplas pecas: " &
+            gruposMultiplos &
+            vbCrLf
+
+        relatorio &=
+            "Grupos unitarios: " &
+            gruposUnitarios &
+            vbCrLf & vbCrLf
+
+        relatorio &=
+            "IPTs identificados: " &
+            totalRegistros &
+            vbCrLf
+
+        relatorio &=
+            "Caminhos validos: " &
+            totalCaminhosValidos &
+            vbCrLf
+
+        relatorio &=
+            "Caminhos invalidos: " &
+            totalCaminhosInvalidos &
+            vbCrLf & vbCrLf
+
+        relatorio &=
+            "Erros registrados: " &
+            erros.Count &
+            vbCrLf & vbCrLf
+
+        relatorio &=
+            "Part Numbers modificados: 0" &
+            vbCrLf &
+            "IPTs salvos: 0"
+
+        If erros.Count > 0 Then
+
+            relatorio &=
+                vbCrLf & vbCrLf &
+                "DETALHES:" &
+                vbCrLf &
+                String.Join(
+                    vbCrLf,
+                    erros.ToArray())
+
+        End If
+
+        MessageBox.Show(
+            relatorio,
+            "Modulo 04.01",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information)
+
+    Catch ex As Exception
+
+        MessageBox.Show(
+            "ERRO NO MODULO 04.01" &
+            vbCrLf & vbCrLf &
+            "ETAPA: " & etapa &
+            vbCrLf & vbCrLf &
+            ex.Message,
+            "Erro",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error)
+
+    End Try
+
+End Sub
+
+
+' ==============================================
+' CLASSE DE REGISTRO
+' ==============================================
+
+Public Class RegistroPeca
+
+    Public Grupo As String
+    Public PartNumber As String
+    Public Caminho As String
+    Public PNOriginal As String
+
+End Class
+
+
+' ==============================================
+' LEITOR CSV
+' ==============================================
+
+Function LerCSV(linha As String) As List(Of String)
+
+    Dim campos As New List(Of String)
+
+    Dim campo As New StringBuilder
+
+    Dim dentroAspas As Boolean = False
+
+    Dim i As Integer = 0
+
+    While i < linha.Length
+
+        Dim caractere As Char = linha(i)
+
+        If caractere = """"c Then
+
+            If dentroAspas AndAlso
+               i + 1 < linha.Length AndAlso
+               linha(i + 1) = """"c Then
+
+                campo.Append(""""c)
+                i += 1
+
+            Else
+
+                dentroAspas = Not dentroAspas
+
+            End If
+
+        ElseIf caractere = ";"c AndAlso
+               Not dentroAspas Then
+
+            campos.Add(campo.ToString())
+            campo.Clear()
+
+        Else
+
+            campo.Append(caractere)
+
+        End If
+
+        i += 1
+
+    End While
+
+    campos.Add(campo.ToString())
+
+    Return campos
+
+End Function
