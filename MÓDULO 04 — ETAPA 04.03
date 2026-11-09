@@ -1,0 +1,489 @@
+Imports Inventor
+Imports System
+Imports System.IO
+Imports System.Collections.Generic
+Imports System.Text
+Imports System.Windows.Forms
+Imports System.Globalization
+
+
+Sub Main()
+
+    Dim etapa As String = "INICIALIZACAO"
+
+    Try
+
+        ' ==========================================
+        ' 1 - VERIFICAR MONTAGEM
+        ' ==========================================
+
+        etapa = "VERIFICACAO DA MONTAGEM"
+
+        Dim asmDoc As AssemblyDocument =
+            TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+
+        If asmDoc Is Nothing Then
+            Throw New Exception("Abra uma montagem IAM.")
+        End If
+
+        ' ==========================================
+        ' 2 - LOCALIZAR ARQUIVOS
+        ' ==========================================
+
+        etapa = "LOCALIZACAO DOS ARQUIVOS"
+
+        Dim pasta As String =
+            System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(asmDoc.FullFileName),
+                "iLogic_Processamento")
+
+        Dim arquivoEntrada As String =
+            System.IO.Path.Combine(
+                pasta,
+                "Corpos_Identificados.csv")
+
+        Dim arquivoSaida As String =
+            System.IO.Path.Combine(
+                pasta,
+                "Geometrias_Preparadas.csv")
+
+        If Not System.IO.File.Exists(arquivoEntrada) Then
+            Throw New Exception("Corpos_Identificados.csv nao encontrado.")
+        End If
+
+        ' ==========================================
+        ' 3 - CONFIGURAR TRANSIENT BREP
+        ' ==========================================
+
+        etapa = "CONFIGURACAO TRANSIENT BREP"
+
+        Dim tb As TransientBRep =
+            ThisApplication.TransientBRep
+
+        ' ==========================================
+        ' 4 - LER CSV
+        ' ==========================================
+
+        etapa = "LEITURA DO CSV"
+
+        Dim linhas As String() =
+            System.IO.File.ReadAllLines(arquivoEntrada, Encoding.UTF8)
+
+        If linhas.Length < 2 Then
+            Throw New Exception("CSV sem registros.")
+        End If
+
+        Dim cabecalho As List(Of String) =
+            LerCSV(linhas(0))
+
+        Dim indiceGrupo As Integer = 0
+        Dim indicePN As Integer = 1
+        Dim indiceCaminho As Integer = -1
+        Dim indicePNOriginal As Integer = 3
+        Dim indiceCorpos As Integer = -1
+        Dim indiceStatus As Integer = -1
+
+        For i As Integer = 0 To cabecalho.Count - 1
+
+            Select Case cabecalho(i).Trim().ToUpperInvariant()
+
+                Case "CAMINHO"
+                    indiceCaminho = i
+
+                Case "CORPOS_SOLIDOS"
+                    indiceCorpos = i
+
+                Case "STATUS"
+                    indiceStatus = i
+
+            End Select
+
+        Next
+
+        If indiceCaminho < 0 OrElse
+           indiceCorpos < 0 OrElse
+           indiceStatus < 0 Then
+
+            Throw New Exception(
+                "Cabecalho do CSV nao corresponde ao esperado.")
+
+        End If
+
+        ' ==========================================
+        ' 5 - ESTRUTURAS
+        ' ==========================================
+
+        etapa = "CRIACAO DAS ESTRUTURAS"
+
+        Dim documentos As New Dictionary(
+            Of String, PartDocument)(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim corposOriginais As New Dictionary(
+            Of String, SurfaceBody)(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim copiasTemporarias As New Dictionary(
+            Of String, SurfaceBody)(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim erros As New List(Of String)
+
+        Dim saida As New List(Of String)
+
+        saida.Add(
+            "GRUPO;PN_PRELIMINAR;CAMINHO;PN_ORIGINAL;" &
+            "VOLUME_CM3;DX_MM;DY_MM;DZ_MM;STATUS")
+
+        Dim totalProcessados As Integer = 0
+        Dim totalCopias As Integer = 0
+        Dim totalErros As Integer = 0
+
+        ' ==========================================
+        ' 6 - PROCESSAR IPTs
+        ' ==========================================
+
+        For i As Integer = 1 To linhas.Length - 1
+
+            If String.IsNullOrWhiteSpace(linhas(i)) Then
+                Continue For
+            End If
+
+            Dim campos As List(Of String) =
+                LerCSV(linhas(i))
+
+            Dim grupo As String = ""
+            Dim pn As String = ""
+            Dim caminho As String = ""
+            Dim pnOriginal As String = ""
+
+            Try
+
+                etapa = "LEITURA DO REGISTRO"
+
+                If campos.Count <= indiceStatus Then
+                    Throw New Exception("Registro incompleto.")
+                End If
+
+                grupo = campos(indiceGrupo)
+                pn = campos(indicePN)
+                caminho = campos(indiceCaminho)
+                pnOriginal = campos(indicePNOriginal)
+
+                If campos(indiceStatus).Trim().ToUpperInvariant() <> "VALIDO" Then
+                    Throw New Exception("IPT nao esta marcado como VALIDO.")
+                End If
+
+                If Not System.IO.File.Exists(caminho) Then
+                    Throw New Exception("Arquivo IPT nao encontrado.")
+                End If
+
+                ' ==================================
+                ' ABRIR OU RECUPERAR DOCUMENTO
+                ' ==================================
+
+                etapa = "ABERTURA DO DOCUMENTO"
+
+                Dim partDoc As PartDocument = Nothing
+
+                If documentos.ContainsKey(caminho) Then
+
+                    partDoc = documentos(caminho)
+
+                Else
+
+                    Dim docAberto As Document = Nothing
+
+                    For Each doc As Document In ThisApplication.Documents
+
+                        If String.Equals(
+                            doc.FullFileName,
+                            caminho,
+                            StringComparison.OrdinalIgnoreCase) Then
+
+                            docAberto = doc
+                            Exit For
+
+                        End If
+
+                    Next
+
+                    If docAberto IsNot Nothing Then
+
+                        partDoc = TryCast(docAberto, PartDocument)
+
+                    Else
+
+                        Dim novoDoc As Document =
+                            ThisApplication.Documents.Open(caminho, False)
+
+                        partDoc = TryCast(novoDoc, PartDocument)
+
+                    End If
+
+                    If partDoc Is Nothing Then
+                        Throw New Exception("Documento IPT invalido.")
+                    End If
+
+                    documentos.Add(caminho, partDoc)
+
+                End If
+
+                ' ==================================
+                ' IDENTIFICAR CORPO SOLIDO
+                ' ==================================
+
+                etapa = "IDENTIFICACAO DO CORPO"
+
+                Dim corpoOriginal As SurfaceBody = Nothing
+
+                Dim quantidade As Integer = 0
+
+                For Each body As SurfaceBody In
+                    partDoc.ComponentDefinition.SurfaceBodies
+
+                    If body.IsSolid Then
+
+                        quantidade += 1
+
+                        corpoOriginal = body
+
+                    End If
+
+                Next
+
+                If quantidade <> 1 Then
+
+                    Throw New Exception(
+                        "Quantidade de corpos solidos diferente de um: " &
+                        quantidade)
+
+                End If
+
+                corposOriginais.Add(
+                    caminho,
+                    corpoOriginal)
+
+                ' ==================================
+                ' CRIAR COPIA TEMPORARIA
+                ' ==================================
+
+                etapa = "CRIACAO DA COPIA TEMPORARIA"
+
+                Dim copia As SurfaceBody =
+                    tb.Copy(corpoOriginal)
+
+                If copia Is Nothing Then
+                    Throw New Exception("Falha ao criar copia temporaria.")
+                End If
+
+                copiasTemporarias.Add(
+                    caminho,
+                    copia)
+
+                totalCopias += 1
+
+                ' ==================================
+                ' CALCULAR VOLUME
+                ' ==================================
+
+                etapa = "CALCULO DO VOLUME"
+
+                Dim volume As Double =
+                    copia.Volume(0.0001)
+
+                ' ==================================
+                ' CALCULAR DIMENSOES
+                ' ==================================
+
+                etapa = "CALCULO DAS DIMENSOES"
+
+                Dim caixa As Box = copia.RangeBox
+
+                Dim dx As Double =
+                    Math.Abs(
+                        caixa.MaxPoint.X -
+                        caixa.MinPoint.X) * 10
+
+                Dim dy As Double =
+                    Math.Abs(
+                        caixa.MaxPoint.Y -
+                        caixa.MinPoint.Y) * 10
+
+                Dim dz As Double =
+                    Math.Abs(
+                        caixa.MaxPoint.Z -
+                        caixa.MinPoint.Z) * 10
+
+                ' ==================================
+                ' EXPORTAR RESULTADO
+                ' ==================================
+
+                saida.Add(
+                    CSV(grupo) & ";" &
+                    CSV(pn) & ";" &
+                    CSV(caminho) & ";" &
+                    CSV(pnOriginal) & ";" &
+                    volume.ToString("F8", CultureInfo.InvariantCulture) & ";" &
+                    dx.ToString("F4", CultureInfo.InvariantCulture) & ";" &
+                    dy.ToString("F4", CultureInfo.InvariantCulture) & ";" &
+                    dz.ToString("F4", CultureInfo.InvariantCulture) & ";" &
+                    CSV("PREPARADO"))
+
+                totalProcessados += 1
+
+            Catch ex As Exception
+
+                totalErros += 1
+
+                erros.Add(
+                    caminho & " : " & ex.Message)
+
+                saida.Add(
+                    CSV(grupo) & ";" &
+                    CSV(pn) & ";" &
+                    CSV(caminho) & ";" &
+                    CSV(pnOriginal) & ";;;;;" &
+                    CSV("ERRO"))
+
+            End Try
+
+        Next
+
+        ' ==========================================
+        ' 7 - SALVAR CSV
+        ' ==========================================
+
+        etapa = "GRAVACAO DO CSV"
+
+        System.IO.File.WriteAllLines(
+            arquivoSaida,
+            saida.ToArray(),
+            Encoding.UTF8)
+
+        ' ==========================================
+        ' 8 - RELATORIO
+        ' ==========================================
+
+        Dim relatorio As String =
+            "MODULO 04.03 - PREPARACAO CONCLUIDA" &
+            vbCrLf & vbCrLf &
+            "IPTs processados: " & totalProcessados &
+            vbCrLf &
+            "Copias temporarias criadas: " & totalCopias &
+            vbCrLf &
+            "Corpos originais identificados: " & corposOriginais.Count &
+            vbCrLf &
+            "Erros: " & totalErros &
+            vbCrLf & vbCrLf &
+            "Part Numbers modificados: 0" &
+            vbCrLf &
+            "IPTs salvos: 0" &
+            vbCrLf & vbCrLf &
+            "Arquivo gerado:" &
+            vbCrLf &
+            arquivoSaida
+
+        If erros.Count > 0 Then
+
+            relatorio &= vbCrLf & vbCrLf &
+                "DETALHES:" &
+                vbCrLf &
+                String.Join(vbCrLf, erros.ToArray())
+
+        End If
+
+        MessageBox.Show(
+            relatorio,
+            "Modulo 04.03",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information)
+
+    Catch ex As Exception
+
+        MessageBox.Show(
+            "ERRO NO MODULO 04.03" &
+            vbCrLf & vbCrLf &
+            "ETAPA: " & etapa &
+            vbCrLf & vbCrLf &
+            ex.Message,
+            "Erro",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error)
+
+    End Try
+
+End Sub
+
+
+' ==============================================
+' LEITOR CSV
+' ==============================================
+
+Function LerCSV(linha As String) As List(Of String)
+
+    Dim campos As New List(Of String)
+
+    Dim campo As New StringBuilder
+
+    Dim dentroAspas As Boolean = False
+
+    Dim i As Integer = 0
+
+    While i < linha.Length
+
+        Dim caractere As Char = linha(i)
+
+        If caractere = """"c Then
+
+            If dentroAspas AndAlso
+               i + 1 < linha.Length AndAlso
+               linha(i + 1) = """"c Then
+
+                campo.Append(""""c)
+                i += 1
+
+            Else
+
+                dentroAspas = Not dentroAspas
+
+            End If
+
+        ElseIf caractere = ";"c AndAlso
+               Not dentroAspas Then
+
+            campos.Add(campo.ToString())
+            campo.Clear()
+
+        Else
+
+            campo.Append(caractere)
+
+        End If
+
+        i += 1
+
+    End While
+
+    campos.Add(campo.ToString())
+
+    Return campos
+
+End Function
+
+
+' ==============================================
+' FORMATAR CSV
+' ==============================================
+
+Function CSV(valor As String) As String
+
+    If valor Is Nothing Then
+        valor = ""
+    End If
+
+    Return """" &
+        valor.Replace("""", """""") &
+        """"
+
+End Function
