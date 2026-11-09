@@ -1,0 +1,509 @@
+Imports Inventor
+Imports System
+Imports System.IO
+Imports System.Collections.Generic
+Imports System.Text
+Imports System.Globalization
+Imports System.Windows.Forms
+
+
+Sub Main()
+
+    Dim etapa As String = "INICIALIZACAO"
+
+    Try
+
+        ' ==========================================
+        ' 1 - VERIFICAR MONTAGEM
+        ' ==========================================
+
+        etapa = "VERIFICACAO DA MONTAGEM"
+
+        Dim asmDoc As AssemblyDocument =
+            TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+
+        If asmDoc Is Nothing Then
+            Throw New Exception("Abra uma montagem IAM.")
+        End If
+
+        ' ==========================================
+        ' 2 - LOCALIZAR ARQUIVOS
+        ' ==========================================
+
+        etapa = "LOCALIZACAO DOS ARQUIVOS"
+
+        Dim pasta As String =
+            System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(asmDoc.FullFileName),
+                "iLogic_Processamento")
+
+        Dim arquivoEntrada As String =
+            System.IO.Path.Combine(
+                pasta,
+                "Grupos_Geometricos.csv")
+
+        Dim arquivoSaida As String =
+            System.IO.Path.Combine(
+                pasta,
+                "Corpos_Normalizados.csv")
+
+        If Not System.IO.File.Exists(arquivoEntrada) Then
+            Throw New Exception("Grupos_Geometricos.csv nao encontrado.")
+        End If
+
+        ' ==========================================
+        ' 3 - CONFIGURAR TRANSIENT BREP
+        ' ==========================================
+
+        etapa = "CONFIGURACAO GEOMETRICA"
+
+        Dim tb As TransientBRep =
+            ThisApplication.TransientBRep
+
+        Dim tg As TransientGeometry =
+            ThisApplication.TransientGeometry
+
+        ' ==========================================
+        ' 4 - LER CSV
+        ' ==========================================
+
+        etapa = "LEITURA DOS GRUPOS"
+
+        Dim linhas As String() =
+            System.IO.File.ReadAllLines(arquivoEntrada, Encoding.UTF8)
+
+        If linhas.Length < 2 Then
+            Throw New Exception("CSV de grupos sem registros.")
+        End If
+
+        Dim cabecalho As List(Of String) =
+            LerCSV(linhas(0))
+
+        Dim idxGrupo As Integer = -1
+        Dim idxPN As Integer = -1
+        Dim idxCaminho As Integer = -1
+
+        For i As Integer = 0 To cabecalho.Count - 1
+
+            Dim nome As String =
+                cabecalho(i).Trim().ToUpperInvariant()
+
+            If nome = "GRUPO" Then idxGrupo = i
+
+            If nome = "PN_PRELIMINAR" Then idxPN = i
+
+            If nome = "CAMINHO" Then idxCaminho = i
+
+        Next
+
+        If idxGrupo < 0 OrElse
+           idxPN < 0 OrElse
+           idxCaminho < 0 Then
+
+            Throw New Exception(
+                "Colunas GRUPO, PN_PRELIMINAR ou CAMINHO nao encontradas.")
+
+        End If
+
+        ' ==========================================
+        ' 5 - ESTRUTURAS
+        ' ==========================================
+
+        Dim documentos As New Dictionary(
+            Of String, PartDocument)(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim grupos As New Dictionary(
+            Of String, List(Of String))(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim pnPorArquivo As New Dictionary(
+            Of String, String)(
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim erros As New List(Of String)
+
+        Dim saida As New List(Of String)
+
+        saida.Add(
+            "GRUPO;PN_PRELIMINAR;CAMINHO;" &
+            "DX_MM;DY_MM;DZ_MM;VOLUME_CM3;STATUS")
+
+        ' ==========================================
+        ' 6 - ORGANIZAR GRUPOS
+        ' ==========================================
+
+        etapa = "ORGANIZACAO DOS GRUPOS"
+
+        For i As Integer = 1 To linhas.Length - 1
+
+            If String.IsNullOrWhiteSpace(linhas(i)) Then
+                Continue For
+            End If
+
+            Dim campos As List(Of String) =
+                LerCSV(linhas(i))
+
+            If campos.Count <= Math.Max(
+                idxGrupo,
+                Math.Max(idxPN, idxCaminho)) Then
+
+                erros.Add("Linha " & (i + 1) & ": registro incompleto.")
+                Continue For
+
+            End If
+
+            Dim grupo As String = campos(idxGrupo).Trim()
+            Dim pn As String = campos(idxPN).Trim()
+            Dim caminho As String = campos(idxCaminho).Trim()
+
+            If grupo = "" OrElse caminho = "" Then
+                erros.Add("Linha " & (i + 1) & ": grupo ou caminho vazio.")
+                Continue For
+            End If
+
+            If Not grupos.ContainsKey(grupo) Then
+
+                grupos.Add(
+                    grupo,
+                    New List(Of String))
+
+            End If
+
+            If Not grupos(grupo).Contains(caminho) Then
+
+                grupos(grupo).Add(caminho)
+
+            End If
+
+            If Not pnPorArquivo.ContainsKey(caminho) Then
+
+                pnPorArquivo.Add(caminho, pn)
+
+            End If
+
+        Next
+
+        ' ==========================================
+        ' 7 - PROCESSAR IPTs
+        ' ==========================================
+
+        Dim processados As Integer = 0
+        Dim normalizados As Integer = 0
+        Dim corposInvalidos As Integer = 0
+
+        For Each grupo As KeyValuePair(
+            Of String, List(Of String)) In grupos
+
+            For Each caminho As String In grupo.Value
+
+                Try
+
+                    etapa = "ABERTURA DO IPT"
+
+                    If Not System.IO.File.Exists(caminho) Then
+                        Throw New Exception("Arquivo IPT nao encontrado.")
+                    End If
+
+                    Dim partDoc As PartDocument = Nothing
+
+                    If documentos.ContainsKey(caminho) Then
+
+                        partDoc = documentos(caminho)
+
+                    Else
+
+                        Dim docExistente As Document = Nothing
+
+                        For Each doc As Document In ThisApplication.Documents
+
+                            If String.Equals(
+                                doc.FullFileName,
+                                caminho,
+                                StringComparison.OrdinalIgnoreCase) Then
+
+                                docExistente = doc
+                                Exit For
+
+                            End If
+
+                        Next
+
+                        If docExistente IsNot Nothing Then
+
+                            partDoc = TryCast(docExistente, PartDocument)
+
+                        Else
+
+                            partDoc = TryCast(
+                                ThisApplication.Documents.Open(caminho, False),
+                                PartDocument)
+
+                        End If
+
+                        If partDoc Is Nothing Then
+                            Throw New Exception("Documento IPT invalido.")
+                        End If
+
+                        documentos.Add(caminho, partDoc)
+
+                    End If
+
+                    etapa = "IDENTIFICACAO DO CORPO SOLIDO"
+
+                    Dim corpoOriginal As SurfaceBody = Nothing
+                    Dim quantidade As Integer = 0
+
+                    For Each body As SurfaceBody In
+                        partDoc.ComponentDefinition.SurfaceBodies
+
+                        If body.IsSolid Then
+
+                            quantidade += 1
+                            corpoOriginal = body
+
+                        End If
+
+                    Next
+
+                    If quantidade <> 1 Then
+
+                        corposInvalidos += 1
+
+                        Throw New Exception(
+                            "Esperado um corpo solido. Encontrados: " &
+                            quantidade)
+
+                    End If
+
+                    ' ==================================
+                    ' 8 - CRIAR COPIA TEMPORARIA
+                    ' ==================================
+
+                    etapa = "CRIACAO DA COPIA TEMPORARIA"
+
+                    Dim copia As SurfaceBody =
+                        tb.Copy(corpoOriginal)
+
+                    ' ==================================
+                    ' 9 - NORMALIZAR CORPO
+                    ' ==================================
+
+                    etapa = "NORMALIZACAO GEOMETRICA"
+
+                    Dim caixa As Box = copia.RangeBox
+
+                    Dim centroX As Double =
+                        (caixa.MinPoint.X + caixa.MaxPoint.X) / 2.0
+
+                    Dim centroY As Double =
+                        (caixa.MinPoint.Y + caixa.MaxPoint.Y) / 2.0
+
+                    Dim inicioZ As Double =
+                        caixa.MinPoint.Z
+
+                    Dim deslocamento As Vector =
+                        tg.CreateVector(
+                            -centroX,
+                            -centroY,
+                            -inicioZ)
+
+                    Dim matriz As Matrix =
+                        tg.CreateMatrix()
+
+                    matriz.SetTranslation(deslocamento)
+
+                    tb.Transform(copia, matriz)
+
+                    ' ==================================
+                    ' 10 - DIMENSOES NORMALIZADAS
+                    ' ==================================
+
+                    etapa = "CALCULO DAS DIMENSOES"
+
+                    Dim caixaNormalizada As Box =
+                        copia.RangeBox
+
+                    Dim dx As Double =
+                        Math.Abs(
+                            caixaNormalizada.MaxPoint.X -
+                            caixaNormalizada.MinPoint.X) * 10
+
+                    Dim dy As Double =
+                        Math.Abs(
+                            caixaNormalizada.MaxPoint.Y -
+                            caixaNormalizada.MinPoint.Y) * 10
+
+                    Dim dz As Double =
+                        Math.Abs(
+                            caixaNormalizada.MaxPoint.Z -
+                            caixaNormalizada.MinPoint.Z) * 10
+
+                    Dim volume As Double =
+                        copia.Volume(0.0001)
+
+                    ' ==================================
+                    ' 11 - EXPORTAR REGISTRO
+                    ' ==================================
+
+                    saida.Add(
+                        CSV(grupo.Key) & ";" &
+                        CSV(pnPorArquivo(caminho)) & ";" &
+                        CSV(caminho) & ";" &
+                        dx.ToString("F4", CultureInfo.InvariantCulture) & ";" &
+                        dy.ToString("F4", CultureInfo.InvariantCulture) & ";" &
+                        dz.ToString("F4", CultureInfo.InvariantCulture) & ";" &
+                        volume.ToString("F8", CultureInfo.InvariantCulture) & ";" &
+                        CSV("NORMALIZADO"))
+
+                    processados += 1
+                    normalizados += 1
+
+                Catch ex As Exception
+
+                    erros.Add(
+                        caminho & " : " & ex.Message)
+
+                    saida.Add(
+                        CSV(grupo.Key) & ";" &
+                        CSV(If(pnPorArquivo.ContainsKey(caminho),
+                               pnPorArquivo(caminho), "")) & ";" &
+                        CSV(caminho) & ";;;;;" &
+                        CSV("ERRO"))
+
+                End Try
+
+            Next
+
+        Next
+
+        ' ==========================================
+        ' 12 - GRAVAR RESULTADO
+        ' ==========================================
+
+        etapa = "GRAVACAO DO CSV"
+
+        System.IO.File.WriteAllLines(
+            arquivoSaida,
+            saida.ToArray(),
+            Encoding.UTF8)
+
+        ' ==========================================
+        ' 13 - RELATORIO
+        ' ==========================================
+
+        Dim relatorio As String =
+            "MODULO 04.04-A - NORMALIZACAO CONCLUIDA" &
+            vbCrLf & vbCrLf &
+            "Grupos identificados: " & grupos.Count &
+            vbCrLf &
+            "IPTs processados: " & processados &
+            vbCrLf &
+            "Corpos normalizados: " & normalizados &
+            vbCrLf &
+            "Corpos invalidos: " & corposInvalidos &
+            vbCrLf &
+            "Erros: " & erros.Count &
+            vbCrLf & vbCrLf &
+            "Part Numbers modificados: 0" &
+            vbCrLf &
+            "IPTs salvos: 0" &
+            vbCrLf & vbCrLf &
+            "Arquivo gerado:" &
+            vbCrLf &
+            arquivoSaida
+
+        If erros.Count > 0 Then
+
+            relatorio &= vbCrLf & vbCrLf &
+                "DETALHES DOS ERROS:" &
+                vbCrLf &
+                String.Join(vbCrLf, erros.ToArray())
+
+        End If
+
+        MessageBox.Show(
+            relatorio,
+            "Modulo 04.04-A",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information)
+
+    Catch ex As Exception
+
+        MessageBox.Show(
+            "ERRO NO MODULO 04.04-A" &
+            vbCrLf & vbCrLf &
+            "ETAPA: " & etapa &
+            vbCrLf & vbCrLf &
+            ex.Message,
+            "Erro",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error)
+
+    End Try
+
+End Sub
+
+
+' ==============================================
+' LEITOR CSV
+' ==============================================
+
+Function LerCSV(linha As String) As List(Of String)
+
+    Dim campos As New List(Of String)
+    Dim campo As New StringBuilder
+    Dim dentroAspas As Boolean = False
+
+    Dim i As Integer = 0
+
+    While i < linha.Length
+
+        Dim c As Char = linha(i)
+
+        If c = """"c Then
+
+            If dentroAspas AndAlso
+               i + 1 < linha.Length AndAlso
+               linha(i + 1) = """"c Then
+
+                campo.Append(""""c)
+                i += 1
+
+            Else
+
+                dentroAspas = Not dentroAspas
+
+            End If
+
+        ElseIf c = ";"c AndAlso Not dentroAspas Then
+
+            campos.Add(campo.ToString())
+            campo.Clear()
+
+        Else
+
+            campo.Append(c)
+
+        End If
+
+        i += 1
+
+    End While
+
+    campos.Add(campo.ToString())
+
+    Return campos
+
+End Function
+
+
+Function CSV(valor As String) As String
+
+    If valor Is Nothing Then valor = ""
+
+    Return """" &
+        valor.Replace("""", """""") &
+        """"
+
+End Function
