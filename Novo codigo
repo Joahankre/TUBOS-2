@@ -1,0 +1,1125 @@
+Imports Inventor
+Imports System
+Imports System.Windows.Forms
+Imports System.Collections.Generic
+Imports System.Globalization
+Imports System.IO
+
+
+Sub Main()
+
+    ' ==========================================================
+    ' 1 - VERIFICA DOCUMENTO ATIVO
+    ' ==========================================================
+
+    Dim oDoc As Document = ThisApplication.ActiveDocument
+
+    If oDoc.DocumentType <> DocumentTypeEnum.kAssemblyDocumentObject Then
+
+        MessageBox.Show("Execute esta regra em uma montagem IAM.", "Documento inválido")
+        Return
+
+    End If
+
+    Dim asmDoc As AssemblyDocument = CType(oDoc, AssemblyDocument)
+
+    ' ==========================================================
+    ' 2 - OBTEM BOM MODEL DATA
+    ' ==========================================================
+
+    Dim bom As BOM = asmDoc.ComponentDefinition.BOM
+
+    bom.StructuredViewEnabled = True
+
+    Dim modelDataView As BOMView = Nothing
+
+    For Each bomView As BOMView In bom.BOMViews
+
+        If BOMView.ViewType = BOMViewTypeEnum.kModelDataBOMViewType Then
+            modelDataView = BOMView
+            Exit For
+        End If
+
+    Next
+
+    If modelDataView Is Nothing Then
+        MessageBox.Show("BOM Model Data não encontrada.", "Erro")
+        Return
+    End If
+
+    ' ==========================================================
+    ' 3 - DICIONARIOS
+    ' ==========================================================
+
+    Dim frameRows As New List(Of BOMRow)
+
+    Dim documentos As New Dictionary(Of String, Document)(
+        StringComparer.OrdinalIgnoreCase)
+
+    Dim framesPorArquivo As New Dictionary(Of String, List(Of String))(
+        StringComparer.OrdinalIgnoreCase)
+
+    ' Agrupamento por Family, Size, comprimento e massa.
+    ' Cada grupo contém representantes de geometrias diferentes.
+
+    Dim geometriasPorGrupo As New Dictionary(Of String, List(Of SurfaceBody))(
+        StringComparer.OrdinalIgnoreCase)
+
+    Dim letrasPorGrupo As New Dictionary(Of String, List(Of String))(
+        StringComparer.OrdinalIgnoreCase)
+
+    ' ==========================================================
+    ' 4 - LOCALIZA TODOS OS FRAMES
+    ' ==========================================================
+
+    For Each bomRow As BOMRow In modelDataView.BOMRows
+
+        ColetarFramesRecursivo(BOMRow, frameRows)
+
+    Next
+
+    If frameRows.Count = 0 Then
+        MessageBox.Show("Nenhum Frame foi encontrado.", "Informação")
+        Return
+    End If
+
+    ' ==========================================================
+    ' 5 - COLETA TODOS OS IPT DENTRO DOS FRAMES
+    ' ==========================================================
+
+    For Each frameRow As BOMRow In frameRows
+
+        Try
+
+            Dim frameDoc As Document =
+                frameRow.ComponentDefinitions.Item(1).Document
+
+            Dim framePN As String =
+                ObterPropriedade(
+                    frameDoc,
+                    "Design Tracking Properties",
+                    "Part Number")
+
+            Dim frameNome As String =
+                framePN & " [" & frameDoc.DisplayName & "]"
+
+            If frameRow.ChildRows IsNot Nothing Then
+
+                For Each child As BOMRow In frameRow.ChildRows
+
+                    ColetarPecasFrame(
+                        child,
+                        frameNome,
+                        documentos,
+                        framesPorArquivo)
+
+                Next
+
+            End If
+
+        Catch
+        End Try
+
+    Next
+
+    If documentos.Count = 0 Then
+        MessageBox.Show(
+            "Nenhum arquivo IPT foi encontrado dentro dos Frames.",
+            "Informação")
+        Return
+    End If
+
+    ' ==========================================================
+    ' 6 - CONFIRMA A SUBSTITUICAO
+    ' ==========================================================
+
+    Dim resposta As DialogResult = MessageBox.Show(
+        "Foram encontrados " & documentos.Count & " arquivos IPT dentro dos Frames." &
+        vbCrLf & vbCrLf &
+        "Os Part Numbers serão atualizados utilizando:" &
+        vbCrLf &
+        "• Family" &
+        vbCrLf &
+        "• Size Designation" &
+        vbCrLf &
+        "• Comprimento" &
+        vbCrLf &
+        "• Massa" &
+        vbCrLf &
+        "• Comparação geométrica dos tubos" &
+        vbCrLf & vbCrLf &
+        "Geometrias iguais receberão o mesmo Part Number." &
+        vbCrLf &
+        "Geometrias diferentes receberão letras sequenciais." &
+        vbCrLf & vbCrLf &
+        "Somente a propriedade Part Number será modificada." &
+        vbCrLf &
+        "Os nomes físicos dos arquivos serão preservados." &
+        vbCrLf & vbCrLf &
+        "Deseja continuar?",
+        "Atualização de Part Numbers",
+        MessageBoxButtons.YesNo,
+        MessageBoxIcon.Warning)
+
+    If resposta <> DialogResult.Yes Then Return
+
+    ' ==========================================================
+    ' 7 - CONTADORES E CONFIGURACOES
+    ' ==========================================================
+
+    Dim contadorAplicados As Integer = 0
+    Dim contadorIguais As Integer = 0
+    Dim contadorIncompletos As Integer = 0
+    Dim contadorErros As Integer = 0
+
+    Dim contadorGeometrias As Integer = 0
+    Dim contadorComparacoes As Integer = 0
+
+    Dim listaErros As New List(Of String)
+
+    ' Tolerância volumétrica em cm3
+
+    Dim tolerancia As Double = 0.0001
+    Dim precisao As Double = 0.0001
+
+    Dim tb As TransientBRep = ThisApplication.TransientBRep
+    Dim tg As TransientGeometry = ThisApplication.TransientGeometry
+
+    ' ==========================================================
+    ' 8 - ANALISA E APLICA PART NUMBER
+    ' ==========================================================
+
+    For Each kvp As KeyValuePair(Of String, Document) In documentos
+
+        Try
+
+            Dim partDoc As PartDocument =
+                TryCast(kvp.Value, PartDocument)
+
+            If partDoc Is Nothing Then Continue For
+
+            Dim compDef As PartComponentDefinition =
+                partDoc.ComponentDefinition
+
+            ' --------------------------------------------------
+            ' PART NUMBER ATUAL
+            ' --------------------------------------------------
+
+            Dim pnAtual As String =
+                ObterPropriedade(
+                    partDoc,
+                    "Design Tracking Properties",
+                    "Part Number")
+
+            ' --------------------------------------------------
+            ' FAMILY
+            ' --------------------------------------------------
+
+            Dim family As String =
+                ObterPropriedade(
+                    partDoc,
+                    "Content Library Component Properties",
+                    "Family")
+
+            ' --------------------------------------------------
+            ' SIZE DESIGNATION
+            ' --------------------------------------------------
+
+            Dim sizeDesignation As String =
+                ObterSizeDesignation(partDoc)
+
+            ' --------------------------------------------------
+            ' NORMALIZA FAMILY
+            ' --------------------------------------------------
+
+            Dim familyPN As String = ""
+
+            If Not String.IsNullOrWhiteSpace(family) Then
+
+                familyPN = family.Trim().ToUpperInvariant()
+                familyPN = familyPN.Replace(" ", "-")
+                familyPN = familyPN.Replace("_", "-")
+
+            End If
+
+            ' --------------------------------------------------
+            ' NORMALIZA SIZE DESIGNATION
+            ' --------------------------------------------------
+
+            Dim secaoPN As String = ""
+
+            If Not String.IsNullOrWhiteSpace(sizeDesignation) Then
+
+                secaoPN = sizeDesignation.Trim().ToUpperInvariant()
+                secaoPN = secaoPN.Replace(" ", "")
+                secaoPN = secaoPN.Replace("MM", "")
+                secaoPN = secaoPN.Replace(",", ".")
+                secaoPN = secaoPN.Replace("×", "X")
+
+            End If
+
+            ' --------------------------------------------------
+            ' DIMENSOES DA GEOMETRIA
+            ' --------------------------------------------------
+
+            Dim dx As Double = 0
+            Dim dy As Double = 0
+            Dim dz As Double = 0
+
+            Dim rangeBox As Box = compDef.RangeBox
+
+            Dim pMin As Inventor.Point = rangeBox.MinPoint
+            Dim pMax As Inventor.Point = rangeBox.MaxPoint
+
+            dx = Math.Abs(pMax.X - pMin.X) * 10
+            dy = Math.Abs(pMax.Y - pMin.Y) * 10
+            dz = Math.Abs(pMax.Z - pMin.Z) * 10
+
+            Dim comprimento As Double =
+                Math.Max(dx, Math.Max(dy, dz))
+
+            ' --------------------------------------------------
+            ' MASSA EM KG
+            ' --------------------------------------------------
+
+            Dim massaKg As Double =
+                compDef.MassProperties.Mass
+
+            ' --------------------------------------------------
+            ' FORMATA COMPRIMENTO E MASSA
+            ' --------------------------------------------------
+
+            Dim comprimentoTexto As String =
+                Math.Round(
+                    comprimento,
+                    0,
+                    MidpointRounding.AwayFromZero).ToString(
+                        "0",
+                        CultureInfo.InvariantCulture)
+
+            Dim massaTexto As String =
+                massaKg.ToString(
+                    "F3",
+                    CultureInfo.InvariantCulture)
+
+            ' --------------------------------------------------
+            ' VERIFICA DADOS
+            ' --------------------------------------------------
+
+            If String.IsNullOrWhiteSpace(familyPN) OrElse
+               String.IsNullOrWhiteSpace(secaoPN) OrElse
+               comprimento <= 0 Then
+
+                contadorIncompletos += 1
+                Continue For
+
+            End If
+
+            ' --------------------------------------------------
+            ' OBTEM CORPO SOLIDO
+            ' --------------------------------------------------
+
+            Dim corpo As SurfaceBody = Nothing
+
+            If Not ObterCorpoSolidoUnico(compDef, corpo) Then
+
+                contadorIncompletos += 1
+
+                listaErros.Add(
+                    System.IO.Path.GetFileName(kvp.Key) &
+                    " : Não possui exatamente um corpo sólido.")
+
+                Continue For
+
+            End If
+
+            ' --------------------------------------------------
+            ' CHAVE DO GRUPO
+            ' --------------------------------------------------
+
+            Dim chaveGrupo As String =
+                familyPN & "|" &
+                secaoPN & "|" &
+                comprimentoTexto & "|" &
+                massaTexto
+
+            ' --------------------------------------------------
+            ' IDENTIFICA GEOMETRIA
+            ' --------------------------------------------------
+
+            Dim sufixo As String =
+                IdentificarGeometria(
+                    corpo,
+                    chaveGrupo,
+                    geometriasPorGrupo,
+                    letrasPorGrupo,
+                    tb,
+                    tg,
+                    precisao,
+                    tolerancia,
+                    contadorComparacoes,
+                    contadorGeometrias)
+
+            ' --------------------------------------------------
+            ' GERA PART NUMBER FINAL
+            ' --------------------------------------------------
+
+            Dim novoPN As String =
+                familyPN &
+                " - " &
+                secaoPN &
+                " - " &
+                comprimentoTexto &
+                "mm - " &
+                massaTexto &
+                "kg"
+
+            ' A primeira geometria não recebe letra.
+            ' Somente geometrias diferentes recebem sufixo.
+
+            If Not String.IsNullOrEmpty(sufixo) Then
+                novoPN &= " - " & sufixo
+            End If
+
+            ' --------------------------------------------------
+            ' VERIFICA SE JA ESTA ATUALIZADO
+            ' --------------------------------------------------
+
+            If String.Equals(
+                pnAtual,
+                novoPN,
+                StringComparison.OrdinalIgnoreCase) Then
+
+                contadorIguais += 1
+                Continue For
+
+            End If
+
+            ' --------------------------------------------------
+            ' SUBSTITUI SOMENTE PART NUMBER
+            ' --------------------------------------------------
+
+            Dim propriedadePN As Inventor.Property =
+                partDoc.PropertySets.Item(
+                    "Design Tracking Properties").Item("Part Number")
+
+            propriedadePN.Value = novoPN
+
+            ' --------------------------------------------------
+            ' SALVA IPT
+            ' --------------------------------------------------
+
+            partDoc.Save()
+
+            contadorAplicados += 1
+
+        Catch ex As Exception
+
+            contadorErros += 1
+
+            listaErros.Add(
+                System.IO.Path.GetFileName(kvp.Key) &
+                " : " &
+                ex.Message)
+
+        End Try
+
+    Next
+
+    ' ==========================================================
+    ' 9 - RESULTADO FINAL
+    ' ==========================================================
+
+    Dim mensagem As String =
+        "PROCESSAMENTO CONCLUÍDO!" &
+        vbCrLf & vbCrLf &
+        "Frames encontrados: " &
+        frameRows.Count &
+        vbCrLf &
+        "Arquivos IPT identificados: " &
+        documentos.Count &
+        vbCrLf & vbCrLf &
+        "Part Numbers substituídos: " &
+        contadorAplicados &
+        vbCrLf &
+        "Já atualizados: " &
+        contadorIguais &
+        vbCrLf &
+        "Dados incompletos: " &
+        contadorIncompletos &
+        vbCrLf &
+        "Erros: " &
+        contadorErros &
+        vbCrLf & vbCrLf &
+        "GEOMETRIA" &
+        vbCrLf &
+        "Geometrias distintas identificadas: " &
+        contadorGeometrias &
+        vbCrLf &
+        "Comparações geométricas executadas: " &
+        contadorComparacoes
+
+    If listaErros.Count > 0 Then
+
+        mensagem &= vbCrLf & vbCrLf &
+            "DETALHES DOS ERROS:" &
+            vbCrLf &
+            String.Join(vbCrLf, listaErros.ToArray())
+
+    End If
+
+    MessageBox.Show(
+        mensagem,
+        "Atualização de Part Numbers",
+        MessageBoxButtons.OK,
+        MessageBoxIcon.Information)
+
+End Sub
+
+
+' ==============================================================
+' 10 - IDENTIFICA GEOMETRIA E ATRIBUI SUFIXO
+' ==============================================================
+
+Function IdentificarGeometria(
+    corpo As SurfaceBody,
+    chaveGrupo As String,
+    geometriasPorGrupo As Dictionary(Of String, List(Of SurfaceBody)),
+    letrasPorGrupo As Dictionary(Of String, List(Of String)),
+    tb As TransientBRep,
+    tg As TransientGeometry,
+    precisao As Double,
+    tolerancia As Double,
+    ByRef contadorComparacoes As Integer,
+    ByRef contadorGeometrias As Integer) As String
+
+    ' ----------------------------------------------------------
+    ' CRIA GRUPO SE NECESSARIO
+    ' ----------------------------------------------------------
+
+    If Not geometriasPorGrupo.ContainsKey(chaveGrupo) Then
+
+        geometriasPorGrupo.Add(
+            chaveGrupo,
+            New List(Of SurfaceBody))
+
+        letrasPorGrupo.Add(
+            chaveGrupo,
+            New List(Of String))
+
+    End If
+
+    Dim representantes As List(Of SurfaceBody) =
+        geometriasPorGrupo(chaveGrupo)
+
+    Dim letras As List(Of String) =
+        letrasPorGrupo(chaveGrupo)
+
+    ' ----------------------------------------------------------
+    ' COMPARA COM GEOMETRIAS JA IDENTIFICADAS
+    ' ----------------------------------------------------------
+
+    For i As Integer = 0 To representantes.Count - 1
+
+        contadorComparacoes += 1
+
+        Dim comparacaoValida As Boolean = False
+
+        Dim iguais As Boolean =
+            GeometriasIguais(
+                representantes(i),
+                corpo,
+                tb,
+                tg,
+                precisao,
+                tolerancia,
+                comparacaoValida)
+
+        If Not comparacaoValida Then
+
+            Throw New Exception(
+                "Não foi possível concluir a comparação geométrica.")
+
+        End If
+
+        If iguais Then
+
+            ' Mesma geometria: reutiliza o mesmo sufixo.
+
+            Return letras(i)
+
+        End If
+
+    Next
+
+    ' ----------------------------------------------------------
+    ' NOVA GEOMETRIA
+    ' ----------------------------------------------------------
+
+    Dim novoSufixo As String = ""
+
+    If representantes.Count > 0 Then
+
+        ' Primeira geometria: sem letra.
+        ' Segunda geometria: A.
+        ' Terceira geometria: B.
+
+        novoSufixo =
+            ObterLetraAlfabeto(representantes.Count - 1)
+
+    End If
+
+    ' Guarda uma cópia independente da geometria.
+
+    representantes.Add(tb.Copy(corpo))
+    letras.Add(novoSufixo)
+
+    contadorGeometrias += 1
+
+    Return novoSufixo
+
+End Function
+
+
+' ==============================================================
+' 11 - COMPARAÇÃO GEOMÉTRICA
+' ==============================================================
+
+Function GeometriasIguais(
+    corpoA As SurfaceBody,
+    corpoB As SurfaceBody,
+    tb As TransientBRep,
+    tg As TransientGeometry,
+    precisao As Double,
+    tolerancia As Double,
+    ByRef comparacaoValida As Boolean) As Boolean
+
+    comparacaoValida = False
+
+    Try
+
+        Dim volumeOriginalA As Double =
+            corpoA.Volume(precisao)
+
+        Dim volumeOriginalB As Double =
+            corpoB.Volume(precisao)
+
+        ' ------------------------------------------------------
+        ' TESTE INICIAL DE VOLUME
+        ' ------------------------------------------------------
+
+        If Math.Abs(volumeOriginalA - volumeOriginalB) > tolerancia Then
+
+            comparacaoValida = True
+            Return False
+
+        End If
+
+        ' ------------------------------------------------------
+        ' CENTROS DAS CAIXAS ENVOLVENTES
+        ' ------------------------------------------------------
+
+        Dim boxA As Box = corpoA.RangeBox
+        Dim boxB As Box = corpoB.RangeBox
+
+        Dim centroA As Inventor.Point =
+            tg.CreatePoint(
+                (boxA.MinPoint.X + boxA.MaxPoint.X) / 2,
+                (boxA.MinPoint.Y + boxA.MaxPoint.Y) / 2,
+                (boxA.MinPoint.Z + boxA.MaxPoint.Z) / 2)
+
+        Dim centroB As Inventor.Point =
+            tg.CreatePoint(
+                (boxB.MinPoint.X + boxB.MaxPoint.X) / 2,
+                (boxB.MinPoint.Y + boxB.MaxPoint.Y) / 2,
+                (boxB.MinPoint.Z + boxB.MaxPoint.Z) / 2)
+
+        ' ------------------------------------------------------
+        ' ANGULOS E EIXOS
+        ' ------------------------------------------------------
+
+        Dim angulos() As Double = {
+            0,
+            Math.PI / 2,
+            Math.PI,
+            3 * Math.PI / 2
+        }
+
+        Dim eixos() As Vector = {
+            tg.CreateVector(1, 0, 0),
+            tg.CreateVector(0, 1, 0),
+            tg.CreateVector(0, 0, 1)
+        }
+
+        Dim testesValidos As Integer = 0
+
+        ' ======================================================
+        ' 64 COMBINACOES DE ROTACAO
+        ' ======================================================
+
+        For ix As Integer = 0 To 3
+
+            For iy As Integer = 0 To 3
+
+                For iz As Integer = 0 To 3
+
+                    Try
+
+                        ' --------------------------------------
+                        ' COPIA INDEPENDENTE DE B
+                        ' --------------------------------------
+
+                        Dim alinhadoB As SurfaceBody =
+                            tb.Copy(corpoB)
+
+                        ' --------------------------------------
+                        ' ROTACAO X
+                        ' --------------------------------------
+
+                        If ix > 0 Then
+
+                            Dim mx As Matrix = tg.CreateMatrix()
+
+                            mx.SetToRotation(
+                                angulos(ix),
+                                eixos(0),
+                                centroB)
+
+                            tb.Transform(alinhadoB, mx)
+
+                        End If
+
+                        ' --------------------------------------
+                        ' ROTACAO Y
+                        ' --------------------------------------
+
+                        If iy > 0 Then
+
+                            Dim my As Matrix = tg.CreateMatrix()
+
+                            my.SetToRotation(
+                                angulos(iy),
+                                eixos(1),
+                                centroB)
+
+                            tb.Transform(alinhadoB, my)
+
+                        End If
+
+                        ' --------------------------------------
+                        ' ROTACAO Z
+                        ' --------------------------------------
+
+                        If iz > 0 Then
+
+                            Dim mz As Matrix = tg.CreateMatrix()
+
+                            mz.SetToRotation(
+                                angulos(iz),
+                                eixos(2),
+                                centroB)
+
+                            tb.Transform(alinhadoB, mz)
+
+                        End If
+
+                        ' --------------------------------------
+                        ' CENTRALIZA B EM A
+                        ' --------------------------------------
+
+                        Dim deslocamento As Vector =
+                            tg.CreateVector(
+                                centroA.X - centroB.X,
+                                centroA.Y - centroB.Y,
+                                centroA.Z - centroB.Z)
+
+                        Dim mt As Matrix = tg.CreateMatrix()
+
+                        mt.SetTranslation(deslocamento)
+
+                        tb.Transform(alinhadoB, mt)
+
+                        ' --------------------------------------
+                        ' DIFERENCA A - B
+                        ' --------------------------------------
+
+                        Dim diferencaAB As SurfaceBody =
+                            tb.Copy(corpoA)
+
+                        Dim ferramentaB As SurfaceBody =
+                            tb.Copy(alinhadoB)
+
+                        tb.DoBoolean(
+                            diferencaAB,
+                            ferramentaB,
+                            BooleanTypeEnum.kBooleanTypeDifference)
+
+                        Dim volumeAB As Double =
+                            diferencaAB.Volume(precisao)
+
+                        ' --------------------------------------
+                        ' DIFERENCA B - A
+                        ' --------------------------------------
+
+                        Dim diferencaBA As SurfaceBody =
+                            tb.Copy(alinhadoB)
+
+                        Dim ferramentaA As SurfaceBody =
+                            tb.Copy(corpoA)
+
+                        tb.DoBoolean(
+                            diferencaBA,
+                            ferramentaA,
+                            BooleanTypeEnum.kBooleanTypeDifference)
+
+                        Dim volumeBA As Double =
+                            diferencaBA.Volume(precisao)
+
+                        testesValidos += 1
+
+                        ' --------------------------------------
+                        ' GEOMETRIAS IGUAIS
+                        ' --------------------------------------
+
+                        If volumeAB <= tolerancia AndAlso
+                           volumeBA <= tolerancia Then
+
+                            comparacaoValida = True
+                            Return True
+
+                        End If
+
+                    Catch
+                        ' Continua para a próxima combinação.
+                    End Try
+
+                Next
+
+            Next
+
+        Next
+
+        ' ------------------------------------------------------
+        ' RESULTADO DA COMPARACAO
+        ' ------------------------------------------------------
+
+        If testesValidos > 0 Then
+
+            comparacaoValida = True
+            Return False
+
+        End If
+
+    Catch
+    End Try
+
+    comparacaoValida = False
+    Return False
+
+End Function
+
+
+' ==============================================================
+' 12 - CONVERTE NUMERO EM LETRA ALFABÉTICA
+' ==============================================================
+
+Function ObterLetraAlfabeto(indice As Integer) As String
+
+    Dim resultado As String = ""
+    Dim numero As Integer = indice + 1
+
+    While numero > 0
+
+        numero -= 1
+
+        Dim resto As Integer = numero Mod 26
+
+        resultado =
+            ChrW(65 + resto) & resultado
+
+        numero = numero \ 26
+
+    End While
+
+    Return resultado
+
+End Function
+
+
+' ==============================================================
+' 13 - OBTEM CORPO SOLIDO UNICO
+' ==============================================================
+
+Function ObterCorpoSolidoUnico(
+    compDef As PartComponentDefinition,
+    ByRef corpo As SurfaceBody) As Boolean
+
+    corpo = Nothing
+
+    Try
+
+        Dim quantidade As Integer = 0
+
+        For Each body As SurfaceBody In compDef.SurfaceBodies
+
+            If body.IsSolid Then
+
+                quantidade += 1
+                corpo = body
+
+            End If
+
+        Next
+
+        Return quantidade = 1
+
+    Catch
+
+        Return False
+
+    End Try
+
+End Function
+
+
+' ==============================================================
+' 14 - LOCALIZA FRAMES RECURSIVAMENTE
+' ==============================================================
+
+Sub ColetarFramesRecursivo(
+    bomRow As BOMRow,
+    lista As List(Of BOMRow))
+
+    Try
+
+        If bomRow.ComponentDefinitions.Count > 0 Then
+
+            Dim doc As Document =
+                bomRow.ComponentDefinitions.Item(1).Document
+
+            Dim pn As String =
+                ObterPropriedade(
+                    doc,
+                    "Design Tracking Properties",
+                    "Part Number")
+
+            ' --------------------------------------------------
+            ' IGNORA SKELETON E SEUS SUBNIVEIS
+            ' --------------------------------------------------
+
+            If pn.StartsWith(
+                "Skeleton",
+                StringComparison.OrdinalIgnoreCase) Then
+
+                Return
+
+            End If
+
+            ' --------------------------------------------------
+            ' IDENTIFICA FRAME
+            ' --------------------------------------------------
+
+            If pn.StartsWith(
+                "Frame",
+                StringComparison.OrdinalIgnoreCase) Then
+
+                lista.Add(bomRow)
+
+            End If
+
+        End If
+
+        ' ------------------------------------------------------
+        ' PERCORRE SUBNIVEIS
+        ' ------------------------------------------------------
+
+        If bomRow.ChildRows IsNot Nothing Then
+
+            For Each child As bomRow In bomRow.ChildRows
+
+                ColetarFramesRecursivo(child, lista)
+
+            Next
+
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+' ==============================================================
+' 15 - COLETA TODOS OS IPT DENTRO DOS FRAMES
+' ==============================================================
+
+Sub ColetarPecasFrame(
+    bomRow As BOMRow,
+    frameNome As String,
+    documentos As Dictionary(Of String, Document),
+    framesPorArquivo As Dictionary(Of String, List(Of String)))
+
+    Try
+
+        If bomRow.ComponentDefinitions.Count > 0 Then
+
+            Dim primeiroDoc As Document =
+                bomRow.ComponentDefinitions.Item(1).Document
+
+            Dim pn As String =
+                ObterPropriedade(
+                    primeiroDoc,
+                    "Design Tracking Properties",
+                    "Part Number")
+
+            ' --------------------------------------------------
+            ' IGNORA SKELETON E SEUS SUBNIVEIS
+            ' --------------------------------------------------
+
+            If pn.StartsWith(
+                "Skeleton",
+                StringComparison.OrdinalIgnoreCase) Then
+
+                Return
+
+            End If
+
+            ' --------------------------------------------------
+            ' VERIFICA TODAS AS DEFINICOES
+            ' --------------------------------------------------
+
+            For Each compDef As ComponentDefinition In
+                bomRow.ComponentDefinitions
+
+                Try
+
+                    Dim doc As Document = compDef.Document
+
+                    If doc.DocumentType =
+                        DocumentTypeEnum.kPartDocumentObject Then
+
+                        Dim caminho As String = doc.FullFileName
+
+                        If String.IsNullOrWhiteSpace(caminho) Then
+                            Continue For
+                        End If
+
+                        ' --------------------------------------
+                        ' EVITA IPT DUPLICADO
+                        ' --------------------------------------
+
+                        If Not documentos.ContainsKey(caminho) Then
+
+                            documentos.Add(caminho, doc)
+
+                        End If
+
+                        ' --------------------------------------
+                        ' REGISTRA FRAMES RELACIONADOS
+                        ' --------------------------------------
+
+                        If Not framesPorArquivo.ContainsKey(caminho) Then
+
+                            framesPorArquivo.Add(
+                                caminho,
+                                New List(Of String))
+
+                        End If
+
+                        If Not framesPorArquivo(caminho).Contains(frameNome) Then
+
+                            framesPorArquivo(caminho).Add(frameNome)
+
+                        End If
+
+                    End If
+
+                Catch
+                End Try
+
+            Next
+
+        End If
+
+        ' ------------------------------------------------------
+        ' PERCORRE SUBNIVEIS
+        ' ------------------------------------------------------
+
+        If bomRow.ChildRows IsNot Nothing Then
+
+            For Each child As bomRow In bomRow.ChildRows
+
+                ColetarPecasFrame(
+                    child,
+                    frameNome,
+                    documentos,
+                    framesPorArquivo)
+
+            Next
+
+        End If
+
+    Catch
+    End Try
+
+End Sub
+
+
+' ==============================================================
+' 16 - LE PROPRIEDADES DO DOCUMENTO
+' ==============================================================
+
+Function ObterPropriedade(
+    doc As Document,
+    conjunto As String,
+    propriedade As String) As String
+
+    Try
+
+        Return CStr(
+            doc.PropertySets.Item(conjunto).Item(propriedade).Value)
+
+    Catch
+
+        Return ""
+
+    End Try
+
+End Function
+
+
+' ==============================================================
+' 17 - OBTEM SIZE DESIGNATION
+' ==============================================================
+
+Function ObterSizeDesignation(doc As Document) As String
+
+    Try
+
+        For Each propSet As PropertySet In doc.PropertySets
+
+            For Each prop As Inventor.Property In propSet
+
+                If String.Equals(
+                    prop.Name.Trim(),
+                    "Size Designation",
+                    StringComparison.OrdinalIgnoreCase) Then
+
+                    If prop.Value IsNot Nothing Then
+
+                        Return prop.Value.ToString().Trim()
+
+                    End If
+
+                End If
+
+            Next
+
+        Next
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
