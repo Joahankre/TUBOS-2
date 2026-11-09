@@ -1,0 +1,351 @@
+Imports Inventor
+Imports System
+Imports System.IO
+Imports System.Collections.Generic
+Imports System.Globalization
+Imports System.Windows.Forms
+
+Sub Main()
+
+    Try
+
+        ' ==============================================
+        ' 1 - VERIFICAR MONTAGEM
+        ' ==============================================
+
+        Dim asmDoc As AssemblyDocument =
+            TryCast(ThisApplication.ActiveDocument, AssemblyDocument)
+
+        If asmDoc Is Nothing Then
+            MessageBox.Show("Abra uma montagem IAM.")
+            Return
+        End If
+
+        ' ==============================================
+        ' 2 - DEFINIR PASTA DE PROCESSAMENTO
+        ' ==============================================
+
+        Dim pasta As String =
+            System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(asmDoc.FullFileName),
+                "iLogic_Processamento")
+
+        If Not Directory.Exists(pasta) Then
+            Directory.CreateDirectory(pasta)
+        End If
+
+        Dim arquivoEntrada As String =
+            System.IO.Path.Combine(pasta, "IPTs_Coletados.csv")
+
+        Dim arquivoSaida As String =
+            System.IO.Path.Combine(pasta, "PartNumbers_Preliminares.csv")
+
+        If Not System.IO.File.Exists(arquivoEntrada) Then
+
+            MessageBox.Show(
+                "Arquivo IPTs_Coletados.csv nao encontrado." &
+                vbCrLf & vbCrLf &
+                "Precisamos conectar este modulo ao Modulo 01.",
+                "Dados nao encontrados")
+
+            Return
+
+        End If
+
+        ' ==============================================
+        ' 3 - LER ARQUIVOS COLETADOS
+        ' ==============================================
+
+        Dim caminhos As New List(Of String)
+
+        For Each linha As String In System.IO.File.ReadAllLines(arquivoEntrada)
+
+            If String.IsNullOrWhiteSpace(linha) Then
+                Continue For
+            End If
+
+            If linha.Trim().ToUpperInvariant() = "CAMINHO" Then
+                Continue For
+            End If
+
+            caminhos.Add(linha.Trim())
+
+        Next
+
+        If caminhos.Count = 0 Then
+
+            MessageBox.Show("Nenhum IPT encontrado no arquivo de entrada.")
+            Return
+
+        End If
+
+        ' ==============================================
+        ' 4 - PREPARAR RESULTADOS
+        ' ==============================================
+
+        Dim resultados As New List(Of String)
+
+        resultados.Add(
+            "CAMINHO;PN_ORIGINAL;FAMILY;SIZE_DESIGNATION;COMPRIMENTO_MM;MASSA_KG;PN_PRELIMINAR")
+
+        Dim calculados As Integer = 0
+        Dim incompletos As Integer = 0
+        Dim erros As Integer = 0
+
+        ' ==============================================
+        ' 5 - PROCESSAR IPTs
+        ' ==============================================
+
+        For Each caminho As String In caminhos
+
+            Try
+
+                If Not System.IO.File.Exists(caminho) Then
+                    Throw New Exception("Arquivo IPT nao encontrado.")
+                End If
+
+                Dim doc As Document =
+                    ThisApplication.Documents.Open(caminho, False)
+
+                Dim partDoc As PartDocument =
+                    TryCast(doc, PartDocument)
+
+                If partDoc Is Nothing Then
+                    Throw New Exception("Documento nao e um IPT.")
+                End If
+
+                Dim pnOriginal As String =
+                    ObterPropriedade(
+                        partDoc,
+                        "Design Tracking Properties",
+                        "Part Number")
+
+                Dim family As String =
+                    ObterPropriedade(
+                        partDoc,
+                        "Content Library Component Properties",
+                        "Family")
+
+                Dim size As String =
+                    ObterSizeDesignation(partDoc)
+
+                Dim familyPN As String = ""
+
+                If Not String.IsNullOrWhiteSpace(family) Then
+
+                    familyPN = family.Trim().ToUpperInvariant()
+                    familyPN = familyPN.Replace(" ", "-")
+                    familyPN = familyPN.Replace("_", "-")
+
+                End If
+
+                Dim secaoPN As String = ""
+
+                If Not String.IsNullOrWhiteSpace(size) Then
+
+                    secaoPN = size.Trim().ToUpperInvariant()
+                    secaoPN = secaoPN.Replace(" ", "")
+                    secaoPN = secaoPN.Replace("MM", "")
+                    secaoPN = secaoPN.Replace(",", ".")
+                    secaoPN = secaoPN.Replace("×", "X")
+
+                End If
+
+                ' ======================================
+                ' DIMENSOES
+                ' ======================================
+
+                Dim compDef As PartComponentDefinition =
+                    partDoc.ComponentDefinition
+
+                Dim caixa As Box = compDef.RangeBox
+
+                Dim dx As Double =
+                    Math.Abs(caixa.MaxPoint.X - caixa.MinPoint.X) * 10
+
+                Dim dy As Double =
+                    Math.Abs(caixa.MaxPoint.Y - caixa.MinPoint.Y) * 10
+
+                Dim dz As Double =
+                    Math.Abs(caixa.MaxPoint.Z - caixa.MinPoint.Z) * 10
+
+                Dim comprimento As Double =
+                    Math.Max(dx, Math.Max(dy, dz))
+
+                ' ======================================
+                ' MASSA
+                ' ======================================
+
+                Dim massa As Double =
+                    compDef.MassProperties.Mass
+
+                Dim comprimentoTexto As String =
+                    Math.Round(
+                        comprimento,
+                        0,
+                        MidpointRounding.AwayFromZero).ToString(
+                            "0",
+                            CultureInfo.InvariantCulture)
+
+                Dim massaTexto As String =
+                    massa.ToString(
+                        "F3",
+                        CultureInfo.InvariantCulture)
+
+                ' ======================================
+                ' GERAR PART NUMBER
+                ' ======================================
+
+                Dim novoPN As String = ""
+
+                If Not String.IsNullOrWhiteSpace(familyPN) AndAlso
+                   Not String.IsNullOrWhiteSpace(secaoPN) AndAlso
+                   comprimento > 0 Then
+
+                    novoPN =
+                        familyPN &
+                        " - " &
+                        secaoPN &
+                        " - " &
+                        comprimentoTexto &
+                        "mm - " &
+                        massaTexto &
+                        "kg"
+
+                    calculados += 1
+
+                Else
+
+                    incompletos += 1
+
+                End If
+
+                ' ======================================
+                ' ARMAZENAR RESULTADO
+                ' ======================================
+
+                Dim linha As String =
+                    CSV(caminho) & ";" &
+                    CSV(pnOriginal) & ";" &
+                    CSV(family) & ";" &
+                    CSV(size) & ";" &
+                    comprimentoTexto & ";" &
+                    massaTexto & ";" &
+                    CSV(novoPN)
+
+                resultados.Add(linha)
+
+            Catch ex As Exception
+
+                erros += 1
+
+                resultados.Add(
+                    CSV(caminho) & ";;;;;;ERRO: " &
+                    CSV(ex.Message))
+
+            End Try
+
+        Next
+
+        ' ==============================================
+        ' 6 - SALVAR RESULTADOS TEMPORARIOS
+        ' ==============================================
+
+        System.IO.File.WriteAllLines(
+            arquivoSaida,
+            resultados.ToArray(),
+            System.Text.Encoding.UTF8)
+
+        ' ==============================================
+        ' 7 - RELATORIO
+        ' ==============================================
+
+        MessageBox.Show(
+            "MODULO 02 CONCLUIDO" &
+            vbCrLf & vbCrLf &
+            "IPTs analisados: " & caminhos.Count &
+            vbCrLf &
+            "PNs preliminares: " & calculados &
+            vbCrLf &
+            "Dados incompletos: " & incompletos &
+            vbCrLf &
+            "Erros: " & erros &
+            vbCrLf & vbCrLf &
+            "Part Numbers originais modificados: 0" &
+            vbCrLf &
+            "IPTs salvos: 0" &
+            vbCrLf & vbCrLf &
+            "Arquivo gerado:" &
+            vbCrLf & arquivoSaida,
+            "Modulo 02")
+
+    Catch ex As Exception
+
+        MessageBox.Show(
+            "ERRO NO MODULO 02:" &
+            vbCrLf & ex.Message,
+            "Erro")
+
+    End Try
+
+End Sub
+
+
+Function ObterPropriedade(
+    doc As Document,
+    conjunto As String,
+    propriedade As String) As String
+
+    Try
+
+        Return CStr(
+            doc.PropertySets.Item(conjunto).Item(propriedade).Value)
+
+    Catch
+
+        Return ""
+
+    End Try
+
+End Function
+
+
+Function ObterSizeDesignation(
+    doc As Document) As String
+
+    Try
+
+        For Each propSet As PropertySet In doc.PropertySets
+
+            For Each prop As Inventor.Property In propSet
+
+                If String.Equals(
+                    prop.Name.Trim(),
+                    "Size Designation",
+                    StringComparison.OrdinalIgnoreCase) Then
+
+                    If prop.Value IsNot Nothing Then
+                        Return prop.Value.ToString().Trim()
+                    End If
+
+                End If
+
+            Next
+
+        Next
+
+    Catch
+    End Try
+
+    Return ""
+
+End Function
+
+
+Function CSV(valor As String) As String
+
+    If valor Is Nothing Then valor = ""
+
+    Return """" & valor.Replace("""", """""") & """"
+
+End Function
