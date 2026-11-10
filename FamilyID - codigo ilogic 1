@@ -1,0 +1,262 @@
+Imports Inventor
+Imports System
+Imports System.Collections.Generic
+Imports System.Windows.Forms
+Imports System.IO
+
+
+Sub Main()
+
+    ' ==========================================================
+    ' 1 - CONFIGURAÇÕES
+    ' ==========================================================
+
+    Dim guidFrame As String =
+        "{AC211AE0-A7A5-4589-916D-81C529DA6D17}"
+
+    Dim tubeFamilyIds As String() = {
+        "2980f9f9-6671-45ec-a9ea-eb2e39308db6",
+        "849f8d00-7f12-47f9-a920-96e7ecc3055f"
+    }
+
+    ' ==========================================================
+    ' 2 - VERIFICA DOCUMENTO ATIVO
+    ' ==========================================================
+
+    Dim oDoc As Document = ThisApplication.ActiveDocument
+
+    If oDoc.DocumentType <>
+        DocumentTypeEnum.kAssemblyDocumentObject Then
+
+        MessageBox.Show(
+            "Execute esta regra em uma montagem IAM.",
+            "Documento inválido")
+
+        Return
+
+    End If
+
+    Dim asmDoc As AssemblyDocument =
+        CType(oDoc, AssemblyDocument)
+
+    ' ==========================================================
+    ' 3 - DICIONÁRIOS DE ARQUIVOS FÍSICOS ÚNICOS
+    ' ==========================================================
+
+    Dim documentos As New Dictionary(Of String, Document)(
+        StringComparer.OrdinalIgnoreCase)
+
+    Dim encontradosGUID As New HashSet(Of String)(
+        StringComparer.OrdinalIgnoreCase)
+
+    Dim encontradosFamily As New HashSet(Of String)(
+        StringComparer.OrdinalIgnoreCase)
+
+    Dim erros As New List(Of String)
+
+    ' ==========================================================
+    ' 4 - INICIA VARREDURA GLOBAL
+    ' ==========================================================
+
+    Dim totalOcorrencias As Integer = 0
+
+    ColetarEstruturaRecursiva(
+        asmDoc.ComponentDefinition.Occurrences,
+        guidFrame,
+        tubeFamilyIds,
+        documentos,
+        encontradosGUID,
+        encontradosFamily,
+        totalOcorrencias,
+        erros)
+
+    ' ==========================================================
+    ' 5 - RESULTADO DA IDENTIFICAÇÃO
+    ' ==========================================================
+
+    Dim mensagem As String = "DIAGNÓSTICO DA VARREDURA GLOBAL" &
+        vbCrLf & vbCrLf &
+"Ocorrências analisadas: " &
+        totalOcorrencias &
+        vbCrLf &
+"Arquivos encontrados pelo GUID: " &
+        encontradosGUID.Count &
+        vbCrLf &
+"Arquivos encontrados pelos FamilyIds: " &
+        encontradosFamily.Count &
+        vbCrLf & vbCrLf &
+"ARQUIVOS FÍSICOS ÚNICOS" &
+        vbCrLf &
+        documentos.Count &
+        vbCrLf & vbCrLf &
+"Nenhum Part Number foi alterado."
+
+    If erros.Count > 0 Then
+
+        mensagem &= vbCrLf & vbCrLf &
+            "OCORRÊNCIAS COM ERRO: " &
+            erros.Count &
+            vbCrLf &
+            String.Join(vbCrLf, erros.ToArray())
+
+    End If
+
+    MessageBox.Show(
+        mensagem,
+        "Diagnóstico da estrutura",
+        MessageBoxButtons.OK,
+        MessageBoxIcon.Information)
+
+End Sub
+
+
+' ==============================================================
+' 6 - VARREDURA RECURSIVA DA MONTAGEM
+' ==============================================================
+
+Sub ColetarEstruturaRecursiva(
+    ocorrencias As ComponentOccurrences,
+    guidFrame As String,
+    tubeFamilyIds As String(),
+    documentos As Dictionary(Of String, Document),
+    encontradosGUID As HashSet(Of String),
+    encontradosFamily As HashSet(Of String),
+    ByRef totalOcorrencias As Integer,
+    erros As List(Of String))
+
+    Dim ocorrencia As ComponentOccurrence
+
+    For Each ocorrencia In ocorrencias
+
+        totalOcorrencias += 1
+
+        Try
+
+            Dim doc As Document =
+                ocorrencia.Definition.Document
+
+            If doc.DocumentType =
+                DocumentTypeEnum.kPartDocumentObject Then
+
+                Dim caminho As String = doc.FullFileName
+
+                If caminho <> "" Then
+
+                    Dim identificouGUID As Boolean = False
+                    Dim identificouFamily As Boolean = False
+
+                    ' ======================================
+                    ' ETAPA 1 - DOCUMENT INTERESTS
+                    ' ======================================
+
+                    Try
+
+                        Dim interesses As Object =
+                            doc.DocumentInterests
+
+                        identificouGUID =
+                            CBool(interesses.HasInterest(guidFrame))
+
+                    Catch
+
+                        identificouGUID = False
+
+                    End Try
+
+                    ' ======================================
+                    ' ETAPA 2 - FAMILY ID
+                    ' ======================================
+
+                    Try
+
+                        Dim propriedades As PropertySet =
+                            doc.PropertySets.Item(
+                                "Content Library Component Properties")
+
+                        Dim familyId As String =
+                            CStr(propriedades.Item("FamilyId").Value)
+
+                        For Each id As String In tubeFamilyIds
+
+                            If String.Equals(
+                                familyId.Trim(),
+                                id,
+                                StringComparison.OrdinalIgnoreCase) Then
+
+                                identificouFamily = True
+                                Exit For
+
+                            End If
+
+                        Next
+
+                    Catch
+
+                        identificouFamily = False
+
+                    End Try
+
+                    ' ======================================
+                    ' CONSOLIDAÇÃO
+                    ' ======================================
+
+                    If identificouGUID Then
+                        encontradosGUID.Add(caminho)
+                    End If
+
+                    If identificouFamily Then
+                        encontradosFamily.Add(caminho)
+                    End If
+
+                    If identificouGUID OrElse identificouFamily Then
+
+                        If Not documentos.ContainsKey(caminho) Then
+                            documentos.Add(caminho, doc)
+                        End If
+
+                    End If
+
+                End If
+
+            End If
+
+            ' ==========================================
+            ' SUBMONTAGENS
+            ' ==========================================
+
+            Try
+
+                Dim subOcorrencias As ComponentOccurrences =
+                    ocorrencia.SubOccurrences
+
+                If subOcorrencias.Count > 0 Then
+
+                    ColetarEstruturaRecursiva(
+                        subOcorrencias,
+                        guidFrame,
+                        tubeFamilyIds,
+                        documentos,
+                        encontradosGUID,
+                        encontradosFamily,
+                        totalOcorrencias,
+                        erros)
+
+                End If
+
+            Catch ex As Exception
+
+                erros.Add(
+                    ocorrencia.Name & " : " & ex.Message)
+
+            End Try
+
+        Catch ex As Exception
+
+            erros.Add(
+                ocorrencia.Name & " : " & ex.Message)
+
+        End Try
+
+    Next
+
+End Sub
