@@ -1,0 +1,88 @@
+Perfeito. Vamos reaproveitar o máximo possível da regra original. Não faz sentido reconstruir aquilo que já foi desenvolvido, testado e funciona.
+
+Nossa estratégia será de substituição mínima da estrutura de identificação e preservação máxima do processamento existente.
+
+O que será preservado
+Componente da regra original
+
+Decisão
+
+IdentificarGeometria
+
+Preservar integralmente
+
+GeometriasIguais
+
+Preservar integralmente
+
+ObterLetraAlfabeto
+
+Preservar integralmente
+
+ObterCorpoSolidoUnico
+
+Preservar integralmente
+
+ObterPropriedade
+
+Preservar
+
+ObterSizeDesignation
+
+Preservar
+
+Normalização de Family e Size
+
+Preservar
+
+Cálculo de comprimento e massa
+
+Preservar
+
+Geração do novo Part Number
+
+Preservar
+
+Atualização e salvamento dos IPTs
+
+Preservar
+
+O que será substituído
+Identificação de Frames pela BOM.
+
+Coleta de peças dentro dos Frames.
+
+Dicionário frameRows.
+
+Dicionário framesPorArquivo.
+
+Entrará a varredura global por GUID e pelos dois FamilyIds, com identificação única por caminho físico.
+
+Arquitetura final
+Montagem IAM
+
+Estrutura completa de ocorrências
+
+Etapa 1
+
+Busca pelo GUID
+
+Etapa 2
+
+Busca pelos FamilyIds
+
+126 arquivos físicos únicos
+
+Consolidação sem duplicidades
+
+Processamento original
+
+Family → Size → Comprimento → Massa → Geometria
+
+Novos Part Numbers
+
+Preservação dos nomes físicos dos IPTs
+
+Minha recomendação: vamos começar substituindo exclusivamente os blocos 2 a 5 da regra original. Depois conectamos o novo dicionário documentos ao bloco 8, que contém o processamento geométrico.
+
+Assim teremos uma evolução controlada, sem perder o trabalho anterior.
